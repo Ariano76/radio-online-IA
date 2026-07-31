@@ -1,0 +1,5 @@
+apscheduler==3.11.0
+psutil==7.0.0
+watchdog==6.0.0
+python-json-logger==3.3.0
+pytz==2025.2
