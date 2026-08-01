@@ -217,9 +217,10 @@ class RadioScheduler:
             "Scheduler detenido correctamente."
         )
 
-    def main():
-        scheduler = RadioScheduler()
-        scheduler.start()
+def main():
+    scheduler = RadioScheduler()
+    scheduler.start()
 
-    if __name__ == "__main__":
-        main()
+
+if __name__ == "__main__":
+    main()
