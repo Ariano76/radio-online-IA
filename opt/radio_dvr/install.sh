@@ -18,14 +18,14 @@ echo "Actualizando paquetes del sistema..."
 sudo apt update
 
 echo "Instalando dependencias del sistema..."
-sudo apt install -y 
-ffmpeg 
-sqlite3 
-python3 
-python3-pip 
-python3-venv 
-git 
-curl 
+sudo apt install -y \
+ffmpeg \
+sqlite3 \
+python3 \
+python3-pip \
+python3-venv \
+git \
+curl \
 build-essential
 
 echo "Creando entorno virtual..."
