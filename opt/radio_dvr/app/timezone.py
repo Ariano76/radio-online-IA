@@ -16,7 +16,6 @@ def now_peru():
 
     return datetime.now(TIMEZONE)
 
-
 # =========================================================
 # Hora UTC
 

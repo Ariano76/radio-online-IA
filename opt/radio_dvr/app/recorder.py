@@ -174,12 +174,12 @@ class RadioRecorder:
 
     def build_ffmpeg_command(self):
 
-        segment_seconds = (
-            self.station.get("segmento_minutos", 30) * 60
-        )
+        segment_seconds = self.station["segmento_minutos"] * 60
 
-        sample_rate = self.station.get("sample_rate", 16000)
-        channels = self.station.get("channels", 1)
+        sample_rate = self.station["sample_rate"]
+
+        channels = self.station["channels"]
+
         output_pattern = self.wav_directory / "%H%M%S.wav"
 
         return [
@@ -213,6 +213,21 @@ class RadioRecorder:
     def start(self):
 
         if self.is_running():
+
+            required = [
+                "nombre",
+                "url",
+                "segmento_minutos",
+                "sample_rate",
+                "channels"
+                ]
+
+            for field in required:
+                if field not in self.station:
+                    raise ValueError(
+                        f"Falta el parámetro '{field}' en la configuración de la emisora."
+                    )
+
             logger.warning(
                 f"La emisora {self.station['nombre']} ya está grabando."
             )

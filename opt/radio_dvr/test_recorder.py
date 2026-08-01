@@ -8,6 +8,7 @@ from app.settings import CONFIG_DIR
 
 logger = get_logger("test_recorder")
 
+
 def load_station():
     config_file = CONFIG_DIR / "radios.json"
 
@@ -26,7 +27,32 @@ def load_station():
             "No existen emisoras configuradas."
         )
 
-    return stations[0]
+    station = stations[0].copy()
+
+    station.setdefault(
+        "segmento_minutos",
+        config.get("segmento_minutos", 30)
+    )
+
+    audio = config.get("formato_audio", {})
+
+    station.setdefault(
+        "sample_rate",
+        audio.get("sample_rate", 16000)
+    )
+
+    station.setdefault(
+        "channels",
+        audio.get("channels", 1)
+    )
+
+    station.setdefault(
+        "codec",
+        audio.get("codec", "pcm_s16le")
+    )
+
+    return station
+
 
 def print_status(recorder):
     status = recorder.get_status()
@@ -81,11 +107,16 @@ def main():
 
     station = load_station()
 
-    print(f"Emisora: {station['nombre']}")
-    print(f"URL    : {station['url']}")
-    print(
-        f"Segmento: {station.get('segmento_minutos', 30)} minutos"
-    )
+    print("Configuración efectiva:")
+    
+    print(json.dumps({
+        "nombre": station["nombre"],
+        "segmento_minutos": station["segmento_minutos"],
+        "sample_rate": station["sample_rate"],
+        "channels": station["channels"],
+        "codec": station["codec"]
+    }, indent=2, ensure_ascii=False))
+
     print()
 
     recorder = RadioRecorder(station)

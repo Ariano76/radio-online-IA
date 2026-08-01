@@ -33,14 +33,45 @@ class RadioScheduler:
     # ---------------------------------------------------------
 
     def load_config(self):
-
         if not CONFIG_FILE.exists():
             raise FileNotFoundError(
                 f"No existe el archivo de configuración: {CONFIG_FILE}"
             )
 
         with open(CONFIG_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
+            config = json.load(f)
+
+        segmento_default = config.get("segmento_minutos", 30)
+
+        audio = config.get("formato_audio", {})
+
+        sample_rate_default = audio.get("sample_rate", 16000)
+        channels_default = audio.get("channels", 1)
+        codec_default = audio.get("codec", "pcm_s16le")
+
+        for station in config.get("emisoras", []):
+            station.setdefault(
+                "segmento_minutos",
+                segmento_default
+            )
+
+            station.setdefault(
+                "sample_rate",
+                sample_rate_default
+            )
+
+            station.setdefault(
+                "channels",
+                channels_default
+            )
+
+            station.setdefault(
+                "codec",
+                codec_default
+            )
+
+        return config
+
 
     # ---------------------------------------------------------
     # Control de grabaciones
