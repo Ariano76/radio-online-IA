@@ -2,9 +2,9 @@ import os
 import time
 import uuid
 import signal
+import atexit
 import subprocess
 from pathlib import Path
-from datetime import datetime
 
 from app.logger import get_logger
 from app.settings import DATA_DIR
@@ -13,36 +13,67 @@ from app.timezone import now_peru
 logger = get_logger("recorder")
 
 class RadioRecorder:
+    """
+    Motor DVR de grabación para una emisora de radio.
 
-# """
-# Motor DVR de grabación para una emisora de radio.
-# 
-# Responsabilidades:
-# - Crear una sesión de grabación.
-# - Construir el comando FFmpeg.
-# - Iniciar FFmpeg.
-# - Detener FFmpeg.
-# - Exponer el estado del proceso.
-# Este módulo NO administra:
-# - Base de datos.
-# - Conversión MP3.
-# - Watchdog.
-# - Scheduler.
-# - WhisperX.
-# - Manifest JSON.
-#
+    Responsabilidades:
+    - Crear una sesión de grabación.
+    - Construir el comando FFmpeg.
+    - Iniciar FFmpeg.
+    - Detener FFmpeg.
+    - Exponer el estado del proceso.
+
+    Este módulo NO administra:
+    - Base de datos.
+    - Conversión MP3.
+    - Watchdog.
+    - Scheduler.
+    - WhisperX.
+    - Manifest JSON.
+    """
 
     def __init__(self, station: dict):
 
         self.station = station
+
         self.process = None
+
         self.session_id = None
+
         self.start_time = None
+
         self.session_directory = None
+
         self.wav_directory = None
+
         self.lock_file = None
+
+        self._stopping = False
+
         self.env = os.environ.copy()
+
         self.env["TZ"] = "America/Lima"
+
+        atexit.register(self.cleanup)
+
+        signal.signal(signal.SIGTERM, self._signal_handler)
+        signal.signal(signal.SIGINT, self._signal_handler)
+
+        if hasattr(signal, "SIGHUP"):
+            signal.signal(signal.SIGHUP, self._signal_handler)
+
+    # ---------------------------------------------------------
+    # Manejo de señales
+    # ---------------------------------------------------------
+
+    def _signal_handler(self, signum, frame):
+        logger.info(
+            f"Señal recibida: {signum}. Finalizando grabación..."
+        )
+        self.stop()
+
+    def cleanup(self):
+        self.stop()
 
     # ---------------------------------------------------------
     # Directorios
@@ -51,7 +82,9 @@ class RadioRecorder:
     def _create_session_directory(self):
 
         now = now_peru()
+
         session_name = now.strftime("session_%Y%m%d_%H%M%S")
+
         self.session_directory = (
             DATA_DIR
             / self.station["nombre"]
@@ -60,11 +93,12 @@ class RadioRecorder:
             / now.strftime("%d")
             / session_name
         )
+
         self.wav_directory = self.session_directory / "wav"
+
         self.wav_directory.mkdir(parents=True, exist_ok=True)
 
     def current_wav_directory(self):
-
         return self.wav_directory
 
     def current_segment(self):
@@ -76,6 +110,7 @@ class RadioRecorder:
 
         if not files:
             return None
+
         return files[-1]
 
     # ---------------------------------------------------------
@@ -85,7 +120,9 @@ class RadioRecorder:
     def _lock_directory(self):
 
         run_dir = DATA_DIR.parent / "run"
+
         run_dir.mkdir(parents=True, exist_ok=True)
+
         return run_dir
 
     def _acquire_lock(self):
@@ -96,22 +133,40 @@ class RadioRecorder:
         )
 
         if self.lock_file.exists():
+
             try:
+
                 pid = int(self.lock_file.read_text().strip())
+
                 os.kill(pid, 0)
+
                 raise RuntimeError(
                     f"Ya existe una grabación activa para {self.station['nombre']} (PID={pid})"
                 )
+
             except ProcessLookupError:
+
+                logger.warning(
+                    "Se encontró un lock huérfano. Eliminándolo."
+                )
+
                 self.lock_file.unlink()
+
             except ValueError:
+
                 self.lock_file.unlink()
+
         self.lock_file.write_text(str(os.getpid()))
 
     def _release_lock(self):
 
         if self.lock_file and self.lock_file.exists():
-            self.lock_file.unlink()
+            try:
+                self.lock_file.unlink()
+            except Exception:
+                logger.exception(
+                    "No fue posible eliminar el archivo PID."
+                )
 
     # ---------------------------------------------------------
     # FFmpeg
@@ -122,6 +177,7 @@ class RadioRecorder:
         segment_seconds = (
             self.station.get("segmento_minutos", 30) * 60
         )
+
         sample_rate = self.station.get("sample_rate", 16000)
         channels = self.station.get("channels", 1)
         output_pattern = self.wav_directory / "%H%M%S.wav"
@@ -168,6 +224,7 @@ class RadioRecorder:
             self.start_time = now_peru()
             self._create_session_directory()
             command = self.build_ffmpeg_command()
+
             logger.info(
                 f"Iniciando sesión {self.session_id} para {self.station['nombre']}"
             )
@@ -179,15 +236,17 @@ class RadioRecorder:
                 env=self.env,
             )
 
-            # Verificar que FFmpeg realmente inició
             time.sleep(3)
 
             if self.process.poll() is not None:
+
                 logger.error(
                     "FFmpeg terminó inmediatamente después de iniciar."
                 )
+
                 self._release_lock()
                 self.process = None
+
                 return False
 
             logger.info(
@@ -197,51 +256,78 @@ class RadioRecorder:
             return True
 
         except Exception:
+
             logger.exception(
                 "Error iniciando la grabación."
             )
 
             self._release_lock()
+
             self.process = None
+
             return False
 
     def stop(self):
 
-        if self.process is None:
-            return False
-        if self.process.poll() is not None:
-            self.process = None
-            self._release_lock()
+        if self._stopping:
             return True
 
-        logger.info(
-            f"Deteniendo sesión {self.session_id}"
-        )
+        self._stopping = True
 
         try:
-            self.process.send_signal(signal.SIGINT)
-            try:
-                self.process.wait(timeout=20)
-            except subprocess.TimeoutExpired:
-                logger.warning(
-                    "FFmpeg no respondió; enviando SIGKILL."
-                )
-                self.process.kill()
-                self.process.wait(timeout=5)
-            logger.info("Grabación detenida correctamente.")
+
+            if self.process is not None:
+
+                if self.process.poll() is None:
+
+                    logger.info(
+                        f"Deteniendo sesión {self.session_id}"
+                    )
+
+                    try:
+
+                        self.process.send_signal(signal.SIGINT)
+
+                        self.process.wait(timeout=20)
+
+                    except subprocess.TimeoutExpired:
+
+                        logger.warning(
+                            "FFmpeg no respondió; enviando SIGKILL."
+                        )
+
+                        self.process.kill()
+
+                        self.process.wait(timeout=5)
+
+                    except ProcessLookupError:
+                        pass
+
+                    logger.info(
+                        "Grabación detenida correctamente."
+                    )
+
             return True
 
         except Exception:
+
             logger.exception(
                 "Error deteniendo FFmpeg."
             )
+
             return False
 
         finally:
+
             self.process = None
+
             self.start_time = None
+
             self.session_id = None
+
             self._release_lock()
+
+            self._stopping = False
 
     # ---------------------------------------------------------
     # Estado
@@ -255,7 +341,7 @@ class RadioRecorder:
         )
 
     def get_status(self):
-        
+
         return {
             "station": self.station["nombre"],
             "running": self.is_running(),
@@ -276,4 +362,3 @@ class RadioRecorder:
                 else None
             ),
         }
-
