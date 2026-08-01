@@ -8,8 +8,7 @@ from app.logger import get_logger
 from app.database import Database
 from app.timezone import now_peru
 
-BASE_DIR = Path("/opt/radio_dvr")
-DATA_DIR = BASE_DIR / "data"
+from app.settings import DATA_DIR
 
 logger = get_logger("recorder")
 

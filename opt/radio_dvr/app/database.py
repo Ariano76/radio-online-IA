@@ -1,7 +1,8 @@
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path("/opt/radio_dvr/db/recordings.db")
+
+from app.settings import DB_PATH
 
 class Database:
 
