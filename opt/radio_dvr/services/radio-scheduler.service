@@ -1,0 +1,14 @@
+[Unit]
+Description=Radio DVR Scheduler
+After=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/radio_dvr
+ExecStart=/opt/radio_dvr/venv/bin/python -m app.scheduler
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

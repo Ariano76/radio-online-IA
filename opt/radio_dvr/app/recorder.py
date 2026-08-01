@@ -136,3 +136,20 @@ class RadioRecorder:
                 logger.warning("Reconexión detectada")
 
         logger.info("Proceso FFmpeg terminado")
+
+    def current_wav_directory(self):
+        return self.build_output_directory()
+
+    def start(self):
+        cmd = self.build_ffmpeg_command()
+
+        logger.info("Iniciando FFmpeg")
+
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
+        )
+
+        self.start_time = now_peru()

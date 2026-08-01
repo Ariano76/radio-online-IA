@@ -1,0 +1,14 @@
+[Unit]
+Description=Radio DVR Watchdog
+After=radio-scheduler.service
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/opt/radio_dvr
+ExecStart=/opt/radio_dvr/venv/bin/python -m app.watchdog
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
