@@ -1,36 +1,62 @@
 #!/bin/bash
+
 set -e
 
 echo "========================================="
-echo "RADIO DVR - Instalación Fase 1"
+echo "Radio DVR LLM - Instalación"
+echo "Ubuntu 22.04"
 echo "========================================="
 
-sudo apt update
-sudo apt upgrade -y
+# Verificar que estamos en la raíz del proyecto
 
+if [ ! -f "requirements.txt" ]; then
+echo "ERROR: Ejecuta este script desde la raíz del repositorio."
+exit 1
+fi
+
+echo "Actualizando paquetes del sistema..."
+sudo apt update
+
+echo "Instalando dependencias del sistema..."
 sudo apt install -y 
 ffmpeg 
 sqlite3 
-python3-venv 
+python3 
 python3-pip 
+python3-venv 
 git 
-curl
+curl 
+build-essential
 
-sudo mkdir -p /opt/radio_dvr
-
-sudo chown -R $USER:$USER /opt/radio_dvr
-
-cd /opt/radio_dvr
-
-mkdir -p config app data logs db services
-
+echo "Creando entorno virtual..."
+if [ ! -d "venv" ]; then
 python3 -m venv venv
+fi
 
+echo "Activando entorno virtual..."
 source venv/bin/activate
 
-pip install --upgrade pip
+echo "Actualizando pip..."
+python -m pip install --upgrade pip
 
+echo "Instalando dependencias de Python..."
 pip install -r requirements.txt
 
+echo "Verificando FFmpeg..."
+ffmpeg -version >/dev/null 2>&1 || {
+echo "ERROR: FFmpeg no se instaló correctamente."
+exit 1
+}
+
+echo "Verificando SQLite..."
+sqlite3 --version >/dev/null 2>&1 || {
+echo "ERROR: SQLite no está disponible."
+exit 1
+}
+
+echo "========================================="
 echo "Instalación completada correctamente."
-echo "Proyecto instalado en /opt/radio_dvr"
+echo "========================================="
+echo "Para activar el entorno virtual:"
+echo "source venv/bin/activate"
+echo "========================================="
