@@ -1,47 +1,130 @@
-import json
-import subprocess
-import signal
+import os
 import time
+import uuid
+import signal
+import subprocess
 from pathlib import Path
 from datetime import datetime
-from app.logger import get_logger
-from app.database import Database
-from app.timezone import now_peru
 
+from app.logger import get_logger
 from app.settings import DATA_DIR
+from app.timezone import now_peru
 
 logger = get_logger("recorder")
 
 class RadioRecorder:
 
-    def __init__(self, station):
+# """
+# Motor DVR de grabación para una emisora de radio.
+# 
+# Responsabilidades:
+# - Crear una sesión de grabación.
+# - Construir el comando FFmpeg.
+# - Iniciar FFmpeg.
+# - Detener FFmpeg.
+# - Exponer el estado del proceso.
+# Este módulo NO administra:
+# - Base de datos.
+# - Conversión MP3.
+# - Watchdog.
+# - Scheduler.
+# - WhisperX.
+# - Manifest JSON.
+#
+
+    def __init__(self, station: dict):
+
         self.station = station
         self.process = None
-        self.db = Database()
         self.session_id = None
-        self.manifest = {
-            "station": station["nombre"],
-            "url": station["url"],
-            "started_at": None,
-            "ended_at": None,
-            "segments": [],
-            "reconnects": 0
-        }
+        self.start_time = None
+        self.session_directory = None
+        self.wav_directory = None
+        self.lock_file = None
+        self.env = os.environ.copy()
+        self.env["TZ"] = "America/Lima"
 
-    def build_output_directory(self):
+    # ---------------------------------------------------------
+    # Directorios
+    # ---------------------------------------------------------
+
+    def _create_session_directory(self):
+
         now = now_peru()
-        output_dir = (
-            DATA_DIR /
-            self.station["nombre"] /
-            now.strftime("%Y/%m/%d")
+        session_name = now.strftime("session_%Y%m%d_%H%M%S")
+        self.session_directory = (
+            DATA_DIR
+            / self.station["nombre"]
+            / now.strftime("%Y")
+            / now.strftime("%m")
+            / now.strftime("%d")
+            / session_name
         )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        return output_dir
+        self.wav_directory = self.session_directory / "wav"
+        self.wav_directory.mkdir(parents=True, exist_ok=True)
+
+    def current_wav_directory(self):
+
+        return self.wav_directory
+
+    def current_segment(self):
+
+        if self.wav_directory is None:
+            return None
+
+        files = sorted(self.wav_directory.glob("*.wav"))
+
+        if not files:
+            return None
+        return files[-1]
+
+    # ---------------------------------------------------------
+    # Lock
+    # ---------------------------------------------------------
+
+    def _lock_directory(self):
+
+        run_dir = DATA_DIR.parent / "run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        return run_dir
+
+    def _acquire_lock(self):
+
+        self.lock_file = (
+            self._lock_directory()
+            / f"{self.station['nombre']}.pid"
+        )
+
+        if self.lock_file.exists():
+            try:
+                pid = int(self.lock_file.read_text().strip())
+                os.kill(pid, 0)
+                raise RuntimeError(
+                    f"Ya existe una grabación activa para {self.station['nombre']} (PID={pid})"
+                )
+            except ProcessLookupError:
+                self.lock_file.unlink()
+            except ValueError:
+                self.lock_file.unlink()
+        self.lock_file.write_text(str(os.getpid()))
+
+    def _release_lock(self):
+
+        if self.lock_file and self.lock_file.exists():
+            self.lock_file.unlink()
+
+    # ---------------------------------------------------------
+    # FFmpeg
+    # ---------------------------------------------------------
 
     def build_ffmpeg_command(self):
-        output_dir = self.build_output_directory()
-        output_pattern = output_dir / "%H%M%S.wav"
-        segment_seconds = self.station.get("segmento_minutos", 30) * 60
+
+        segment_seconds = (
+            self.station.get("segmento_minutos", 30) * 60
+        )
+        sample_rate = self.station.get("sample_rate", 16000)
+        channels = self.station.get("channels", 1)
+        output_pattern = self.wav_directory / "%H%M%S.wav"
 
         return [
             "ffmpeg",
@@ -56,100 +139,141 @@ class RadioRecorder:
             "-rw_timeout", "15000000",
             "-thread_queue_size", "1024",
             "-i", self.station["url"],
-            "-ac", "1",
-            "-ar", "16000",
+            "-ac", str(channels),
+            "-ar", str(sample_rate),
             "-c:a", "pcm_s16le",
             "-f", "segment",
             "-segment_time", str(segment_seconds),
             "-segment_atclocktime", "1",
             "-strftime", "1",
             "-reset_timestamps", "1",
-            str(output_pattern)
+            str(output_pattern),
         ]
 
-    def start(self, scheduled_start, scheduled_end):
-        logger.info(f"Iniciando grabación: {self.station['nombre']}")
+    # ---------------------------------------------------------
+    # Ciclo de vida
+    # ---------------------------------------------------------
 
-        self.session_id = self.db.create_session(
-            self.station["nombre"],
-            scheduled_start,
-            scheduled_end
-        )
+    def start(self):
 
-        self.manifest["started_at"] = now_peru().isoformat()
+        if self.is_running():
+            logger.warning(
+                f"La emisora {self.station['nombre']} ya está grabando."
+            )
+            return False
 
-        cmd = self.build_ffmpeg_command()
+        try:
+            self._acquire_lock()
+            self.session_id = str(uuid.uuid4())
+            self.start_time = now_peru()
+            self._create_session_directory()
+            command = self.build_ffmpeg_command()
+            logger.info(
+                f"Iniciando sesión {self.session_id} para {self.station['nombre']}"
+            )
 
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
+            self.process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                env=self.env,
+            )
 
-        logger.info(f"FFmpeg PID: {self.process.pid}")
+            # Verificar que FFmpeg realmente inició
+            time.sleep(3)
+
+            if self.process.poll() is not None:
+                logger.error(
+                    "FFmpeg terminó inmediatamente después de iniciar."
+                )
+                self._release_lock()
+                self.process = None
+                return False
+
+            logger.info(
+                f"FFmpeg iniciado correctamente (PID={self.process.pid})"
+            )
+
+            return True
+
+        except Exception:
+            logger.exception(
+                "Error iniciando la grabación."
+            )
+
+            self._release_lock()
+            self.process = None
+            return False
 
     def stop(self):
-        logger.info(f"Deteniendo grabación: {self.station['nombre']}")
 
-        if self.process and self.process.poll() is None:
+        if self.process is None:
+            return False
+        if self.process.poll() is not None:
+            self.process = None
+            self._release_lock()
+            return True
+
+        logger.info(
+            f"Deteniendo sesión {self.session_id}"
+        )
+
+        try:
             self.process.send_signal(signal.SIGINT)
-
             try:
                 self.process.wait(timeout=20)
             except subprocess.TimeoutExpired:
+                logger.warning(
+                    "FFmpeg no respondió; enviando SIGKILL."
+                )
                 self.process.kill()
+                self.process.wait(timeout=5)
+            logger.info("Grabación detenida correctamente.")
+            return True
 
-        self.manifest["ended_at"] = now_peru().isoformat()
+        except Exception:
+            logger.exception(
+                "Error deteniendo FFmpeg."
+            )
+            return False
 
-        self.save_manifest()
+        finally:
+            self.process = None
+            self.start_time = None
+            self.session_id = None
+            self._release_lock()
 
-        logger.info("Grabación finalizada correctamente")
+    # ---------------------------------------------------------
+    # Estado
+    # ---------------------------------------------------------
 
     def is_running(self):
-        return self.process and self.process.poll() is None
 
-    def save_manifest(self):
-        output_dir = self.build_output_directory()
-
-        wav_files = sorted(output_dir.glob("*.wav"))
-
-        for f in wav_files:
-            self.manifest["segments"].append({
-                "file": f.name,
-                "size_bytes": f.stat().st_size
-            })
-
-        with open(output_dir / "manifest.json", "w") as fp:
-            json.dump(self.manifest, fp, indent=4)
-
-    def monitor(self):
-        while self.is_running():
-            line = self.process.stderr.readline()
-
-            if not line:
-                time.sleep(1)
-                continue
-
-            if "Reconnecting" in line:
-                self.manifest["reconnects"] += 1
-                logger.warning("Reconexión detectada")
-
-        logger.info("Proceso FFmpeg terminado")
-
-    def current_wav_directory(self):
-        return self.build_output_directory()
-
-    def start(self):
-        cmd = self.build_ffmpeg_command()
-
-        logger.info("Iniciando FFmpeg")
-
-        self.process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
+        return (
+            self.process is not None
+            and self.process.poll() is None
         )
 
-        self.start_time = now_peru()
+    def get_status(self):
+        
+        return {
+            "station": self.station["nombre"],
+            "running": self.is_running(),
+            "pid": (
+                self.process.pid
+                if self.process
+                else None
+            ),
+            "session_id": self.session_id,
+            "started_at": (
+                self.start_time.isoformat()
+                if self.start_time
+                else None
+            ),
+            "session_directory": (
+                str(self.session_directory)
+                if self.session_directory
+                else None
+            ),
+        }
+

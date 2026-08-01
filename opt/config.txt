@@ -1,6 +1,10 @@
+
+
+file: radios.json
+
 {
     "timezone": "America/Lima",
-    "segmento_minutos": 2,
+    "segmento_minutos": 30,
     "formato_audio": 
     {
         "sample_rate": 16000,
@@ -35,11 +39,11 @@
                 "activo": true,
                 "bloques": [
                     {
-                        "inicio": "14:50:00",
-                        "fin": "15:00:00"
+                        "inicio": "08:00:00",
+                        "fin": "14:00:00"
                     },
                     {
-                        "inicio": "17:00:00",
+                        "inicio": "15:00:00",
                         "fin": "18:00:00"
                     }
                 ]

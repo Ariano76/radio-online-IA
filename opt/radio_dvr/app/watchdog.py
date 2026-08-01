@@ -1,85 +1,132 @@
 import time
-import subprocess
 from pathlib import Path
-from datetime import datetime, timedelta
 from app.logger import get_logger
 from app.timezone import now_peru
 
 logger = get_logger("watchdog")
 
 class ProcessWatchdog:
+#
+# Supervisa una instancia de RadioRecorder.
 
-    def __init__(self, recorder, timeout_seconds=60):
+# Responsabilidades:
+# - Verificar que FFmpeg continúe ejecutándose.
+# - Verificar que el segmento WAV activo siga creciendo.
+# - Detectar congelamientos del stream.
+# - Exponer el estado del monitoreo.
+
+# Este módulo NO reinicia grabaciones automáticamente.
+#La decisión de reiniciar corresponde al Scheduler.
+
+    def __init__(
+        self,
+        recorder,
+        freeze_timeout=60,
+        check_interval=10,
+    ):
         self.recorder = recorder
-        self.timeout_seconds = timeout_seconds
+        self.freeze_timeout = freeze_timeout
+        self.check_interval = check_interval
+
         self.last_size = 0
         self.last_growth = now_peru()
-        self.restarts = 0
 
-    def get_active_wav(self):
-        wav_dir = self.recorder.current_wav_directory()
+    # ---------------------------------------------------------
+    # Proceso
+    # ---------------------------------------------------------
 
-        files = sorted(wav_dir.glob("*.wav"))
+    def process_alive(self):
+        return self.recorder.is_running()
 
-        if not files:
-            return None
+    # ---------------------------------------------------------
+    # Segmento activo
+    # ---------------------------------------------------------
 
-        return files[-1]
+    def current_segment(self):
+        return self.recorder.current_segment()
 
-    def check_file_growth(self):
-        wav = self.get_active_wav()
+    # ---------------------------------------------------------
+    # Crecimiento del archivo
+    # ---------------------------------------------------------
 
-        if wav is None:
+    def file_growing(self):
+        segment = self.current_segment()
+
+        if segment is None:
             return True
-
-        size = wav.stat().st_size
+        try:
+            size = segment.stat().st_size
+        except FileNotFoundError:
+            return True
 
         if size > self.last_size:
             self.last_size = size
             self.last_growth = now_peru()
             return True
 
-        elapsed = (now_peru() - self.last_growth).total_seconds()
+        elapsed = (
+            now_peru() - self.last_growth
+        ).total_seconds()
 
-        if elapsed > self.timeout_seconds:
+        if elapsed > self.freeze_timeout:
             logger.error(
-                f"Archivo congelado durante {elapsed:.0f} segundos"
+                f"El segmento {segment.name} no ha crecido durante {elapsed:.0f} segundos."
             )
             return False
 
         return True
 
-    def check_process(self):
-        if self.recorder.process is None:
-            return False
+    # ---------------------------------------------------------
+    # Estado
+    # ---------------------------------------------------------
 
-        return self.recorder.process.poll() is None
+    def health_check(self):
+        process_ok = self.process_alive()
+        growth_ok = self.file_growing()
 
-    def restart(self):
-        self.restarts += 1
+        healthy = process_ok and growth_ok
 
-        logger.warning(
-            f"Reiniciando FFmpeg (reinicio #{self.restarts})"
-        )
+        return {
+            "healthy": healthy,
+            "process_alive": process_ok,
+            "file_growing": growth_ok,
+            "last_growth": self.last_growth.isoformat(),
+            "current_segment": (
+                str(self.current_segment())
+                if self.current_segment()
+                else None
+            ),
+        }
 
-        self.recorder.stop()
+    # ---------------------------------------------------------
+    # Espera de cierre
+    # ---------------------------------------------------------
 
-        time.sleep(5)
+    @staticmethod
+    def wait_until_closed(path: Path, stable_seconds=3):
+        """
+        Espera hasta que el archivo deje de crecer.
+        Se utiliza antes de iniciar procesos como
+        conversión MP3 o transcripción.
+        """
 
-        self.recorder.start()
-
-        self.last_size = 0
-        self.last_growth = now_peru()
-
-    def monitor(self):
-        logger.info("Watchdog activo")
+        previous_size = -1
+        stable_count = 0
 
         while True:
+            try:
+                current_size = path.stat().st_size
+            except FileNotFoundError:
+                return False
 
-            process_ok = self.check_process()
-            growth_ok = self.check_file_growth()
+            if current_size == previous_size:
+                stable_count += 1
+            else:
+                stable_count = 0
 
-            if not process_ok or not growth_ok:
-                self.restart()
+            if stable_count >= stable_seconds:
+                return True
 
-            time.sleep(10)
+            previous_size = current_size
+            time.sleep(1)
+
