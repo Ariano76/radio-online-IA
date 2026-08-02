@@ -1,7 +1,6 @@
 # ---------------------------------------------------------
 # Version recorder.py que maneja la grabación de una emisora de radio usando FFmpeg
-# funcionando al 100% desde una VPS comercial como la de Oracle.
-# Se hicieron ajustes para que toda la transmision se grabe como un solo archivo WAV y posteriormente se dividira en segmentos de 30 minutos para evitar bloqueos del CDN.
+# funcionando al 100% de manera local.
 # ---------------------------------------------------------
 
 import os
@@ -20,8 +19,6 @@ logger = get_logger("recorder")
 class RadioRecorder:
     """
     Motor DVR de grabación para una emisora de radio.
-    Versión VPS-friendly: grabación continua por bloque para evitar
-    bloqueos del CDN por detección de segmentación.
     """
 
     def __init__(self, station: dict):
@@ -58,17 +55,12 @@ class RadioRecorder:
         return self.wav_directory
 
     def current_segment(self):
-        """
-        Devuelve el archivo de grabación continua actual.
-        """
         if self.wav_directory is None:
             return None
-
-        recording = self.wav_directory / "recording.wav"
-        if recording.exists():
-            return recording
-
-        return None
+        files = sorted(self.wav_directory.glob("*.wav"))
+        if not files:
+            return None
+        return files[-1]
 
     # ---------------------------------------------------------
     # Lock
@@ -110,18 +102,15 @@ class RadioRecorder:
     # FFmpeg
     # ---------------------------------------------------------
     def build_ffmpeg_command(self):
+        segment_seconds = self.station["segmento_minutos"] * 60
         sample_rate = self.station["sample_rate"]
         channels = self.station["channels"]
-
-        # Grabación continua en un único archivo WAV por bloque
-        output_file = self.wav_directory / "recording.wav"
+        output_pattern = self.wav_directory / "%H%M%S.wav"
 
         return [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "warning",
-            "-user_agent",
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
             "-reconnect", "1",
             "-reconnect_at_eof", "1",
             "-reconnect_streamed", "1",
@@ -134,14 +123,19 @@ class RadioRecorder:
             "-ac", str(channels),
             "-ar", str(sample_rate),
             "-c:a", "pcm_s16le",
-            "-f", "wav",
-            str(output_file),
+            "-f", "segment",
+            "-segment_time", str(segment_seconds),
+            "-segment_atclocktime", "1",
+            "-strftime", "1",
+            "-reset_timestamps", "1",
+            str(output_pattern),
         ]
 
     # ---------------------------------------------------------
     # Ciclo de vida
     # ---------------------------------------------------------
     def start(self):
+        # Validación de campos requeridos (corregida: fuera del if is_running)
         required = ["nombre", "url", "segmento_minutos", "sample_rate", "channels"]
         for field in required:
             if field not in self.station:

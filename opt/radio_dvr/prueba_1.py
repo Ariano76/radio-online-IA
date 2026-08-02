@@ -1,4 +1,4 @@
-from app.recorder import RadioRecorder
+from opt.radio_dvr.app.recorder_02 import RadioRecorder
 
 station = {
     "nombre": "radio_local",

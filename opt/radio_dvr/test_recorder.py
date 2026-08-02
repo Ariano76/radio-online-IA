@@ -2,7 +2,7 @@ import json
 import time
 from pathlib import Path
 
-from app.recorder import RadioRecorder
+from opt.radio_dvr.app.recorder_02 import RadioRecorder
 from app.logger import get_logger
 from app.settings import CONFIG_DIR
 
