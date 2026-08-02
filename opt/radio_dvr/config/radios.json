@@ -1,6 +1,6 @@
 {
     "timezone": "America/Lima",
-    "segmento_minutos": 2,
+    "segmento_minutos": 15,
     "formato_audio": 
     {
         "sample_rate": 16000,
@@ -10,7 +10,7 @@
     "emisoras": 
     [
         {
-            "nombre": "radio_local",
+            "nombre": "radiomar",
             "url": "https://mdstrm.com/audio/6839e261d2efddf5bfbc2d3d/icecast.audio?property=emisorasco",
             "activo": true,
             "lunes_viernes":
@@ -18,16 +18,20 @@
                 "activo": true,
                 "bloques": [
                     {
-                        "inicio": "08:00:00",
-                        "fin": "14:00:00"
+                        "inicio": "06:00:00",
+                        "fin": "10:59:00"
+                    },
+                    {
+                        "inicio": "11:00:00",
+                        "fin": "14:59:00"
                     },
                     {
                         "inicio": "15:00:00",
-                        "fin": "18:00:00"
+                        "fin": "18:59:00"
                     },
                     {
                         "inicio": "19:00:00",
-                        "fin": "22:00:00"
+                        "fin": "23:59:00"
                     }
                 ]
             },
@@ -46,15 +50,11 @@
             },
             "domingo": 
             {
-                "activo": false,
+                "activo": true,
                 "bloques": [
                     {
                         "inicio": "08:00:00",
-                        "fin": "14:00:00"
-                    },
-                    {
-                        "inicio": "15:00:00",
-                        "fin": "18:00:00"
+                        "fin": "12:59:00"
                     }
                 ]
             }
