@@ -1,5 +1,5 @@
 #!/bin/bash
 
-sudo systemctl start radio_scheduler.service
+sudo systemctl restart radio_scheduler.service
 
 sudo systemctl status radio_scheduler.service --no-pager

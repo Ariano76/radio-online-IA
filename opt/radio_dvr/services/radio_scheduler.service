@@ -1,0 +1,26 @@
+[Unit]
+Description=Radio DVR Scheduler
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=juan
+WorkingDirectory=/home/juan/opt/radio_dvr
+
+Environment=PYTHONUNBUFFERED=1
+Environment=TZ=America/Lima
+
+ExecStart=/home/juan/opt/radio_dvr/venv/bin/python3 /home/juan/opt/radio_dvr/app/scheduler.py
+
+Restart=always
+RestartSec=5
+
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
