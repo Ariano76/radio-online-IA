@@ -11,7 +11,7 @@ WorkingDirectory=/home/juan/opt/radio_dvr
 Environment=PYTHONUNBUFFERED=1
 Environment=TZ=America/Lima
 
-ExecStart=/home/juan/opt/radio_dvr/venv/bin/python3 /home/juan/opt/radio_dvr/app/scheduler.py
+ExecStart=/home/juan/opt/radio_dvr/venv/bin/python3 -m app.scheduler
 
 Restart=always
 RestartSec=5
