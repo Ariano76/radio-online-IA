@@ -16,5 +16,5 @@ sudo systemctl start radio_scheduler.service
 echo
 echo "Servicio instalado correctamente."
 echo
-
+sleep 5
 sudo systemctl status radio_scheduler.service --no-pager
