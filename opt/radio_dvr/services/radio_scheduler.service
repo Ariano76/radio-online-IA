@@ -6,6 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=ubuntu
+Group=ubuntu
 WorkingDirectory=/home/ubuntu/opt/radio_dvr
 
 Environment=PYTHONUNBUFFERED=1
@@ -13,8 +14,12 @@ Environment=TZ=America/Lima
 
 ExecStart=/bin/bash -lc '/home/ubuntu/opt/radio_dvr/venv/bin/python3 -m app.scheduler'
 
-Restart=always
-RestartSec=5
+# Reinicio conservador para evitar storms de conexión
+Restart=on-failure
+RestartSec=120
+StartLimitInterval=600
+StartLimitBurst=3
+
 
 KillSignal=SIGTERM
 TimeoutStopSec=30
