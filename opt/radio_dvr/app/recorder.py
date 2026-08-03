@@ -141,6 +141,7 @@ class RadioRecorder:
     # ---------------------------------------------------------
     # Ciclo de vida
     # ---------------------------------------------------------
+    """"
     def start(self):
         required = ["nombre", "url", "segmento_minutos", "sample_rate", "channels"]
         for field in required:
@@ -187,6 +188,63 @@ class RadioRecorder:
             self._release_lock()
             self.process = None
             return False
+    """
+
+    def start(self):
+        required = ["nombre", "url", "segmento_minutos", "sample_rate", "channels"]
+        for field in required:
+            if field not in self.station:
+                raise ValueError(
+                    f"Falta el parámetro '{field}' en la configuración de la emisora."
+                )
+
+        if self.is_running():
+            logger.warning(f"La emisora {self.station['nombre']} ya está grabando.")
+            return False
+
+        try:
+            self._acquire_lock()
+            self.session_id = str(uuid.uuid4())
+            self.start_time = now_peru()
+            self._create_session_directory()
+            command = self.build_ffmpeg_command()
+
+            # LOG DE FFMPEG PARA DIAGNÓSTICO
+            ffmpeg_log_path = self.session_directory / "ffmpeg.log"
+            self.ffmpeg_log = open(ffmpeg_log_path, "w")
+
+            logger.info(
+                f"Iniciando sesión {self.session_id} para {self.station['nombre']}"
+            )
+            logger.debug(f"Comando FFmpeg: {' '.join(command)}")
+
+            self.process = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=self.ffmpeg_log,
+                env=self.env,
+            )
+
+            time.sleep(3)
+
+            if self.process.poll() is not None:
+                logger.error("FFmpeg terminó inmediatamente después de iniciar.")
+                self.ffmpeg_log.close()
+                self._release_lock()
+                self.process = None
+                return False
+
+            logger.info(f"FFmpeg iniciado correctamente (PID={self.process.pid})")
+            return True
+
+        except Exception:
+            logger.exception("Error iniciando la grabación.")
+            if hasattr(self, 'ffmpeg_log') and self.ffmpeg_log:
+                self.ffmpeg_log.close()
+            self._release_lock()
+            self.process = None
+            return False
+
 
     def stop(self):
         if self._stopping:
@@ -218,6 +276,15 @@ class RadioRecorder:
             self.session_id = None
             self._release_lock()
             self._stopping = False
+
+            # Cerrar log de FFmpeg
+            # Implementado para encontrar el problema en el VPS, 
+            # solucionado se puede eliminar esta parte
+            if hasattr(self, 'ffmpeg_log') and self.ffmpeg_log:
+                try:
+                    self.ffmpeg_log.close()
+                except Exception:
+                    pass
 
     # ---------------------------------------------------------
     # Estado

@@ -5,13 +5,13 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=juan
-WorkingDirectory=/home/juan/opt/radio_dvr
+User=ubuntu
+WorkingDirectory=/home/ubuntu/opt/radio_dvr
 
 Environment=PYTHONUNBUFFERED=1
 Environment=TZ=America/Lima
 
-ExecStart=/home/juan/opt/radio_dvr/venv/bin/python3 -m app.scheduler
+ExecStart=/home/ubuntu/opt/radio_dvr/venv/bin/python3 -m app.scheduler
 
 Restart=always
 RestartSec=5
