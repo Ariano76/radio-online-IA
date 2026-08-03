@@ -6,7 +6,7 @@ from pathlib import Path
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from opt.radio_dvr.app.recorder_02 import RadioRecorder
+from app.recorder import RadioRecorder
 from app.logger import get_logger
 from app.settings import CONFIG_DIR, TIMEZONE
 
