@@ -14,8 +14,7 @@ logger = get_logger("recorder")
 class RadioRecorder:
     """
     Motor DVR de grabación para una emisora de radio.
-    Versión VPS-friendly: usa curl (OpenSSL) para descargar el stream,
-    y ffmpeg local para convertir a WAV al finalizar el bloque.
+    Versión VPS-friendly: grabación continua por bloque.
     """
 
     def __init__(self, station: dict):
@@ -27,7 +26,6 @@ class RadioRecorder:
         self.wav_directory = None
         self.lock_file = None
         self._stopping = False
-        self.aac_file = None
 
         self.env = os.environ.copy()
         self.env["TZ"] = "America/Lima"
@@ -97,63 +95,35 @@ class RadioRecorder:
                 logger.exception("No fue posible eliminar el archivo PID.")
 
     # ---------------------------------------------------------
-    # curl (descarga del stream)
+    # FFmpeg
     # ---------------------------------------------------------
-    def build_curl_command(self):
-        self.aac_file = self.wav_directory / "recording.aac"
+    def build_ffmpeg_command(self):
+        sample_rate = self.station["sample_rate"]
+        channels = self.station["channels"]
+
+        output_file = self.wav_directory / "recording.wav"
 
         return [
-            "curl",
-            "-s",                       # Silencioso
-            "-L",                       # Seguir redirects
-            "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
-            "--connect-timeout", "15",
-            "--max-time", "0",          # Sin límite de tiempo (bloque completo)
-            "-o", str(self.aac_file),   # Archivo de salida
-            self.station["url"],
-        ]
-
-    # ---------------------------------------------------------
-    # ffmpeg (conversión post-grabación)
-    # ---------------------------------------------------------
-    def convert_to_wav(self):
-        if not self.aac_file or not self.aac_file.exists():
-            logger.error("No existe archivo AAC para convertir.")
-            return False
-
-        wav_file = self.wav_directory / "recording.wav"
-
-        command = [
             "ffmpeg",
             "-hide_banner",
             "-loglevel", "warning",
-            "-i", str(self.aac_file),
-            "-ac", str(self.station["channels"]),
-            "-ar", str(self.station["sample_rate"]),
+            "-user_agent",
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+            "-reconnect", "1",
+            "-reconnect_at_eof", "1",
+            "-reconnect_streamed", "1",
+            "-reconnect_on_network_error", "1",
+            "-reconnect_on_http_error", "4xx,5xx",
+            "-reconnect_delay_max", "15",
+            "-rw_timeout", "15000000",
+            "-thread_queue_size", "1024",
+            "-i", self.station["url"],
+            "-ac", str(channels),
+            "-ar", str(sample_rate),
             "-c:a", "pcm_s16le",
             "-f", "wav",
-            str(wav_file),
+            str(output_file),
         ]
-
-        try:
-            logger.info(f"Convirtiendo {self.aac_file.name} a WAV...")
-            result = subprocess.run(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=300,
-            )
-            if result.returncode == 0:
-                logger.info(f"Conversión exitosa: {wav_file.name}")
-                # Opcional: eliminar AAC original para ahorrar espacio
-                # self.aac_file.unlink()
-                return True
-            else:
-                logger.error(f"FFmpeg devolvió código {result.returncode}")
-                return False
-        except Exception:
-            logger.exception("Error en conversión FFmpeg.")
-            return False
 
     # ---------------------------------------------------------
     # Ciclo de vida
@@ -175,7 +145,7 @@ class RadioRecorder:
             self.session_id = str(uuid.uuid4())
             self.start_time = now_peru()
             self._create_session_directory()
-            command = self.build_curl_command()
+            command = self.build_ffmpeg_command()
 
             logger.info(
                 f"Iniciando sesión {self.session_id} para {self.station['nombre']}"
@@ -191,12 +161,12 @@ class RadioRecorder:
             time.sleep(3)
 
             if self.process.poll() is not None:
-                logger.error("curl terminó inmediatamente después de iniciar.")
+                logger.error("FFmpeg terminó inmediatamente después de iniciar.")
                 self._release_lock()
                 self.process = None
                 return False
 
-            logger.info(f"curl iniciado correctamente (PID={self.process.pid})")
+            logger.info(f"FFmpeg iniciado correctamente (PID={self.process.pid})")
             return True
 
         except Exception:
@@ -213,24 +183,21 @@ class RadioRecorder:
 
         try:
             if self.process is not None and self.process.poll() is None:
-                logger.info(f"Deteniendo descarga de sesión {self.session_id}")
+                logger.info(f"Deteniendo sesión {self.session_id}")
                 try:
                     self.process.send_signal(signal.SIGINT)
                     self.process.wait(timeout=20)
                 except subprocess.TimeoutExpired:
-                    logger.warning("curl no respondió; enviando SIGKILL.")
+                    logger.warning("FFmpeg no respondió; enviando SIGKILL.")
                     self.process.kill()
                     self.process.wait(timeout=5)
                 except ProcessLookupError:
                     pass
-                logger.info("Descarga detenida correctamente.")
-
-            # Conversión post-grabación
-            self.convert_to_wav()
+                logger.info("Grabación detenida correctamente.")
 
             return True
         except Exception:
-            logger.exception("Error deteniendo la grabación.")
+            logger.exception("Error deteniendo FFmpeg.")
             return False
         finally:
             self.process = None
