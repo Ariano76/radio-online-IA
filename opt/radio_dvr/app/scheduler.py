@@ -7,7 +7,7 @@ from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 from apscheduler.triggers.cron import CronTrigger
 
-from app.recorder import RadioRecorder
+from opt.radio_dvr.app.recorder import RadioRecorder
 from app.logger import get_logger
 from app.settings import CONFIG_DIR, TIMEZONE
 
