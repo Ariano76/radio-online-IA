@@ -18,8 +18,9 @@ logger = get_logger("recorder")
 class RadioRecorder:
     """
     Motor DVR de grabación para una emisora de radio.
-    Versión requests+Session: maneja cookies, redirecciones 302, headers
-    realistas y reintentos ante fallos del CDN.
+    Versión robusta: ciclo de reintentos INDEPENDIENTE (cada intento refresca
+    cookies y URL del CDN desde cero), lock auto-liberante ante fallos del thread,
+    timeout generoso para el primer chunk, y fallback a curl.
     """
 
     def __init__(self, station: dict):
@@ -35,6 +36,9 @@ class RadioRecorder:
         self.wav_directory = None
         self.lock_file = None
         self._stopping = False
+        self._lock_owned_by_thread = False
+        self._failed = False
+        self._fail_reason = None
         self.aac_file = None
 
         self.env = os.environ.copy()
@@ -69,7 +73,7 @@ class RadioRecorder:
         return None
 
     # ---------------------------------------------------------
-    # Lock
+    # Lock (robusto contra huérfanos)
     # ---------------------------------------------------------
     def _lock_directory(self):
         run_dir = DATA_DIR.parent / "run"
@@ -86,9 +90,21 @@ class RadioRecorder:
             try:
                 pid = int(self.lock_file.read_text().strip())
                 os.kill(pid, 0)
-                raise RuntimeError(
-                    f"Ya existe una grabación activa para {self.station['nombre']} (PID={pid})"
-                )
+
+                # Verificar que el PID realmente pertenezca a nuestro scheduler
+                try:
+                    with open(f"/proc/{pid}/cmdline", "rb") as f:
+                        cmdline = f.read().decode("utf-8", errors="replace").replace("\x00", " ")
+                    if "python" not in cmdline.lower() and "scheduler" not in cmdline.lower():
+                        logger.warning(
+                            f"Lock huérfano detectado: PID={pid} no es el scheduler "
+                            f"(cmdline: {cmdline[:60]}...). Eliminando."
+                        )
+                        self.lock_file.unlink()
+                except (FileNotFoundError, PermissionError, ProcessLookupError):
+                    logger.warning("Se encontró un lock huérfano. Eliminándolo.")
+                    self.lock_file.unlink()
+
             except ProcessLookupError:
                 logger.warning("Se encontró un lock huérfano. Eliminándolo.")
                 self.lock_file.unlink()
@@ -100,150 +116,232 @@ class RadioRecorder:
     def _release_lock(self):
         if self.lock_file and self.lock_file.exists():
             try:
-                self.lock_file.unlink()
+                current_pid = str(os.getpid())
+                stored_pid = self.lock_file.read_text().strip()
+                if stored_pid == current_pid:
+                    self.lock_file.unlink()
+                else:
+                    logger.warning(
+                        f"No se eliminó el lock: PID almacenado ({stored_pid}) != "
+                        f"PID actual ({current_pid})"
+                    )
             except Exception:
                 logger.exception("No fue posible eliminar el archivo PID.")
 
     # ---------------------------------------------------------
-    # Descarga del stream (núcleo requests + cookies + reintentos)
+    # Descarga del stream (ciclos de reintentos independientes)
     # ---------------------------------------------------------
     def _download_stream(self):
         """
-        Thread worker: realiza la petición inicial, captura cookies,
-        sigue el 302 al CDN y escribe el stream en bloques de 8KB.
-        Incluye reintentos si el CDN no responde inicialmente.
+        Thread worker: realiza hasta 3 ciclos de reintentos INDEPENDIENTES.
+        Cada ciclo crea una Session nueva, obtiene cookies frescas y una
+        URL de CDN fresca. Si todos fallan, intenta 1 fallback con curl.
         """
         url = self.station["url"]
         referer = self.station.get("referer", "https://www.emisorasco.com/")
         origin = self.station.get("origin", "https://www.emisorasco.com")
 
-        # Asegurar que el archivo AAC exista desde el inicio (incluso si está vacío)
         self.aac_file = self.wav_directory / "recording.aac"
-
-        # --- Sesión HTTP con headers realistas ---
-        self._download_session = requests.Session()
-        self._download_session.headers.update({
-            "User-Agent": (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/128.0.0.0 Safari/537.36"
-            ),
-            "Accept": "*/*",
-            "Accept-Language": "es-PE,es;q=0.9,en;q=0.8",
-            "Accept-Encoding": "identity",
-            "Referer": referer,
-            "Origin": origin,
-            "Connection": "keep-alive",
-        })
-
-        stream_url = None
+        success = False
+        self._lock_owned_by_thread = True
 
         try:
-            # ── PASO 1: Petición inicial (captura cookies + redirección) ──
-            logger.info(f"[Session] Petición inicial a {url[:60]}...")
-            r1 = self._download_session.get(
-                url,
-                allow_redirects=False,
-                timeout=(30, 30),  # 30s para conectar, 30s para leer respuesta
-                stream=False,
-            )
-
-            logger.info(f"[Session] Status inicial: {r1.status_code}")
-            for cookie in self._download_session.cookies:
-                logger.info(f"[Session] Cookie recibida: {cookie.name}")
-
-            if r1.status_code in (301, 302, 307, 308):
-                stream_url = r1.headers.get("Location")
-                if not stream_url:
-                    logger.error("[Session] Redirección 302 sin header Location")
-                    return
-                logger.info(f"[Session] Redirección a CDN: {stream_url[:80]}...")
-            elif r1.status_code == 200:
-                stream_url = url
-                logger.info("[Session] Stream directo (sin redirección)")
-            else:
-                logger.error(f"[Session] Status inesperado: {r1.status_code}")
-                return
-
-            # ── PASO 2: Stream desde el CDN con cookies (con reintentos) ──
-            max_retries = 3
-            for attempt in range(1, max_retries + 1):
+            # ── CICLO DE REINTENTOS CON REQUESTS (máx 3) ──
+            max_attempts = 3
+            for attempt in range(1, max_attempts + 1):
                 if self._stop_event.is_set():
-                    logger.info("[Session] Stop solicitado antes de conectar al CDN.")
+                    logger.info("[Session] Stop solicitado antes de conectar.")
                     return
 
+                session = None
                 try:
-                    logger.info(f"[Session] Intento {attempt}/{max_retries} conectando al CDN...")
-                    r2 = self._download_session.get(
+                    logger.info(f"[Session] === Intento {attempt}/{max_attempts} ===")
+                    session = requests.Session()
+                    session.headers.update({
+                        "User-Agent": (
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/128.0.0.0 Safari/537.36"
+                        ),
+                        "Accept": "*/*",
+                        "Accept-Language": "es-PE,es;q=0.9,en;q=0.8",
+                        "Accept-Encoding": "identity",
+                        "Referer": referer,
+                        "Origin": origin,
+                        "Connection": "keep-alive",
+                    })
+
+                    # PASO A: Petición inicial a mdstrm.com (cookies + redirect)
+                    logger.info(f"[Session] Petición inicial a {url[:60]}...")
+                    r1 = session.get(
+                        url,
+                        allow_redirects=False,
+                        timeout=(30, 30),
+                        stream=False,
+                    )
+
+                    logger.info(f"[Session] Status inicial: {r1.status_code}")
+                    for cookie in session.cookies:
+                        logger.info(f"[Session] Cookie: {cookie.name}")
+
+                    if r1.status_code in (301, 302, 307, 308):
+                        stream_url = r1.headers.get("Location")
+                        if not stream_url:
+                            logger.error("[Session] 302 sin header Location")
+                            continue
+                        logger.info(f"[Session] CDN: {stream_url[:80]}...")
+                    elif r1.status_code == 200:
+                        stream_url = url
+                        logger.info("[Session] Stream directo")
+                    else:
+                        logger.error(f"[Session] Status inesperado: {r1.status_code}")
+                        continue
+
+                    # PASO B: Stream desde CDN con timeout generoso para primer chunk
+                    logger.info(f"[Session] Conectando al CDN...")
+                    r2 = session.get(
                         stream_url,
                         stream=True,
-                        timeout=(30, 60),  # 30s conectar, 60s entre chunks
+                        timeout=(30, 180),  # 30s conectar, 180s para primer chunk
                         headers={"Referer": "https://mdstrm.com/"},
                     )
 
                     if r2.status_code != 200:
-                        logger.error(f"[Session] CDN respondió HTTP {r2.status_code}")
-                        if attempt < max_retries:
-                            wait = 5 * attempt
-                            logger.info(f"[Session] Reintentando en {wait}s...")
-                            time.sleep(wait)
-                            continue
-                        return
+                        logger.error(f"[Session] CDN HTTP {r2.status_code}")
+                        continue
 
-                    # ── PASO 3: Escribir chunks al disco ──
-                    logger.info(f"[Session] Conexión establecida. Grabando a: {self.aac_file.name}")
+                    # PASO C: Escribir chunks
+                    logger.info(f"[Session] Grabando a: {self.aac_file.name}")
                     bytes_written = 0
+                    chunk_count = 0
                     last_chunk_time = time.time()
 
                     with open(self.aac_file, "wb") as f:
                         for chunk in r2.iter_content(chunk_size=8192):
                             if self._stop_event.is_set():
-                                logger.info("[Session] Stop solicitado. Cerrando stream...")
+                                logger.info("[Session] Stop solicitado.")
+                                success = True
                                 break
 
                             if chunk:
                                 f.write(chunk)
                                 bytes_written += len(chunk)
                                 last_chunk_time = time.time()
+                                chunk_count += 1
 
-                            # Safety check: si no llega nada en 90s, romper y reintentar
+                            # Si no llega nada en 90s, romper (stream probablemente cortado)
                             if time.time() - last_chunk_time > 90:
-                                logger.warning("[Session] 90s sin recibir datos. Posible corte del CDN.")
+                                logger.warning("[Session] 90s sin datos. Stream cortado.")
                                 break
 
                     logger.info(
-                        f"[Session] Descarga finalizada. Total: {bytes_written / 1024:.1f} KB"
+                        f"[Session] Fin intento {attempt}. Chunks: {chunk_count}, "
+                        f"Bytes: {bytes_written}"
                     )
 
-                    # Si escribimos algo, salimos del loop de reintentos
-                    if bytes_written > 0:
-                        return
-                    elif attempt < max_retries:
-                        logger.info(f"[Session] 0 bytes recibidos. Reintentando...")
-                        time.sleep(5 * attempt)
+                    if bytes_written > 1024:
+                        success = True
+                        return  # Éxito total, salir del thread
+                    else:
+                        logger.warning(f"[Session] 0 bytes en intento {attempt}.")
 
                 except requests.exceptions.Timeout as exc:
-                    logger.error(f"[Session] Timeout en intento {attempt}: {exc}")
-                    if attempt < max_retries:
-                        wait = 5 * attempt
-                        logger.info(f"[Session] Reintentando en {wait}s...")
-                        time.sleep(wait)
-                    else:
-                        logger.error("[Session] Agotados todos los reintentos por timeout.")
+                    logger.error(f"[Session] Timeout intento {attempt}: {exc}")
                 except requests.exceptions.RequestException as exc:
-                    logger.error(f"[Session] Error de red en intento {attempt}: {exc}")
-                    if attempt < max_retries:
-                        time.sleep(5 * attempt)
-                    else:
-                        raise
+                    logger.error(f"[Session] Error red intento {attempt}: {exc}")
+                except Exception:
+                    logger.exception(f"[Session] Error inesperado intento {attempt}")
+                finally:
+                    if session:
+                        session.close()
+
+                # Backoff antes del siguiente intento
+                if attempt < max_attempts and not self._stop_event.is_set():
+                    wait = 10 * attempt
+                    logger.info(f"[Session] Esperando {wait}s antes del siguiente intento...")
+                    time.sleep(wait)
+
+            # ── FALLBACK A CURL (1 intento) ──
+            if not success and not self._stop_event.is_set():
+                logger.warning("[Session] Requests agotado. Fallback a curl...")
+                success = self._download_with_curl(url, referer)
+
+            if not success:
+                self._failed = True
+                self._fail_reason = "Agotados todos los intentos (requests + curl)"
+                logger.error(f"[Session] {self._fail_reason}")
+
+        finally:
+            # Liberar lock SIEMPRE que el thread termine, si somos los dueños
+            if self._lock_owned_by_thread:
+                self._release_lock()
+                self._lock_owned_by_thread = False
+            logger.info("[Session] Thread de descarga finalizado.")
+
+    def _download_with_curl(self, url: str, referer: str) -> bool:
+        """
+        Fallback final usando curl. Realiza un ciclo completo independiente.
+        """
+        self.aac_file = self.wav_directory / "recording.aac"
+        cookie_jar = self.wav_directory / ".curl_cookies.txt"
+
+        command = [
+            "curl",
+            "-s", "-L",
+            "-c", str(cookie_jar),
+            "-b", str(cookie_jar),
+            "-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "--connect-timeout", "60",
+            "--max-time", "0",
+            "-H", f"Referer: {referer}",
+            "-o", str(self.aac_file),
+            url,
+        ]
+
+        try:
+            logger.info(f"[Curl] Ejecutando fallback...")
+            proc = subprocess.Popen(
+                command,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                env=self.env,
+            )
+
+            while proc.poll() is None:
+                if self._stop_event.is_set():
+                    logger.info("[Curl] Stop solicitado. Matando curl...")
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=10)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                    return False
+                time.sleep(1)
+
+            stderr = ""
+            if proc.stderr:
+                stderr = proc.stderr.read().decode("utf-8", errors="ignore")[:200]
+
+            if proc.returncode == 0:
+                if self.aac_file.exists() and self.aac_file.stat().st_size > 1024:
+                    logger.info(f"[Curl] Éxito: {self.aac_file.stat().st_size / 1024:.1f} KB")
+                    return True
+                else:
+                    logger.error("[Curl] Archivo vacío o no creado.")
+                    return False
+            else:
+                logger.error(f"[Curl] Falló código {proc.returncode}. {stderr}")
+                return False
 
         except Exception:
-            logger.exception("[Session] Error inesperado durante la descarga")
+            logger.exception("[Curl] Error ejecutando curl")
+            return False
         finally:
-            if self._download_session:
-                self._download_session.close()
-                self._download_session = None
-            logger.info("[Session] Sesión cerrada.")
+            if cookie_jar.exists():
+                try:
+                    cookie_jar.unlink()
+                except Exception:
+                    pass
 
     # ---------------------------------------------------------
     # ffmpeg (conversión post-grabación)
@@ -253,9 +351,8 @@ class RadioRecorder:
             logger.error("No existe archivo AAC para convertir.")
             return False
 
-        # Si el archivo está vacío, no tiene sentido convertir
         if self.aac_file.stat().st_size == 0:
-            logger.error("El archivo AAC existe pero está vacío (0 bytes).")
+            logger.error("El archivo AAC está vacío (0 bytes).")
             return False
 
         wav_file = self.wav_directory / "recording.wav"
@@ -305,6 +402,10 @@ class RadioRecorder:
             logger.warning(f"La emisora {self.station['nombre']} ya está grabando.")
             return False
 
+        # Resetear estado de fallo
+        self._failed = False
+        self._fail_reason = None
+
         try:
             self._acquire_lock()
             self.session_id = str(uuid.uuid4())
@@ -326,13 +427,13 @@ class RadioRecorder:
             time.sleep(3)
 
             if not self._download_thread.is_alive():
-                logger.error("El thread de descarga terminó inmediatamente después de iniciar.")
+                logger.error("El thread de descarga terminó inmediatamente.")
                 self._release_lock()
                 self._download_thread = None
                 self._stop_event = None
                 return False
 
-            logger.info(f"Descarga iniciada correctamente (session={self.session_id})")
+            logger.info(f"Descarga iniciada (session={self.session_id})")
             return True
 
         except Exception:
@@ -352,15 +453,10 @@ class RadioRecorder:
             if self._download_thread is not None and self._download_thread.is_alive():
                 logger.info(f"Deteniendo descarga de sesión {self.session_id}")
                 self._stop_event.set()
-
-                self._download_thread.join(timeout=30)
+                self._download_thread.join(timeout=45)
 
                 if self._download_thread.is_alive():
-                    logger.warning(
-                        "El thread de descarga no respondió al stop dentro de 30s."
-                    )
-
-                logger.info("Descarga detenida.")
+                    logger.warning("El thread no respondió al stop en 45s.")
 
             # Conversión post-grabación
             self.convert_to_wav()
@@ -370,12 +466,13 @@ class RadioRecorder:
             logger.exception("Error deteniendo la grabación.")
             return False
         finally:
+            self._lock_owned_by_thread = False
+            self._release_lock()
             self.process = None
             self._download_thread = None
             self._stop_event = None
             self.start_time = None
             self.session_id = None
-            self._release_lock()
             self._stopping = False
 
     # ---------------------------------------------------------
@@ -384,10 +481,16 @@ class RadioRecorder:
     def is_running(self):
         return self._download_thread is not None and self._download_thread.is_alive()
 
+    def has_failed(self):
+        """Retorna True si la grabación falló después de agotar todos los intentos."""
+        return self._failed
+
     def get_status(self):
         return {
             "station": self.station["nombre"],
             "running": self.is_running(),
+            "failed": self._failed,
+            "fail_reason": self._fail_reason,
             "pid": os.getpid(),
             "session_id": self.session_id,
             "started_at": self.start_time.isoformat() if self.start_time else None,
